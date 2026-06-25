@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Manhwa Merger</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f0f13;
+    --surface: #1a1a24;
+    --border: #2a2a3a;
+    --accent: #7c6af7;
+    --accent-glow: rgba(124, 106, 247, 0.25);
+    --text: #e8e8f0;
+    --muted: #888899;
+    --success: #4ade80;
+    --success-bg: rgba(74, 222, 128, 0.08);
+    --error: #f87171;
+    --error-bg: rgba(248, 113, 113, 0.08);
+    --warn: #fbbf24;
+    --cancel: #52525b;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 40px 44px;
+    width: 100%;
+    max-width: 560px;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+  }
+
+  .logo { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 6px; }
+  .logo span { color: var(--accent); }
+
+  .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 36px; }
+
+  label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 8px;
+  }
+
+  input[type="url"], input[type="number"], input[type="text"] {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    color: var(--text);
+    font-size: 15px;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  input[type="url"]:focus, input[type="number"]:focus, input[type="text"]:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+  }
+
+  .field { margin-bottom: 20px; }
+
+  .row {
+    display: flex;
+    gap: 16px;
+    align-items: flex-end;
+    margin-bottom: 28px;
+  }
+  .row .field { margin-bottom: 0; flex: 0 0 140px; }
+
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+  button {
+    width: 100%;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 14px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+  }
+  button:hover:not(:disabled) { opacity: 0.88; }
+  button:active:not(:disabled) { transform: scale(0.98); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  /* ── Progress ── */
+  #progress-section { display: none; margin-top: 28px; }
+
+  .progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 10px;
+  }
+  .status-text { font-size: 14px; color: var(--muted); min-height: 20px; }
+  .pct-text { font-size: 13px; font-weight: 700; color: var(--accent); }
+
+  .bar-track { background: var(--border); border-radius: 99px; height: 6px; overflow: hidden; }
+  .bar-fill {
+    background: var(--accent);
+    height: 100%;
+    border-radius: 99px;
+    width: 0%;
+    transition: width 0.4s ease;
+  }
+
+  .cancel-wrap { margin-top: 14px; }
+  #cancel-btn {
+    background: transparent;
+    border: 1px solid var(--cancel);
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 500;
+    padding: 9px;
+    border-radius: 8px;
+  }
+  #cancel-btn:hover:not(:disabled) { border-color: var(--error); color: var(--error); opacity: 1; }
+
+  /* ── Done section ── */
+  #done-section {
+    display: none;
+    margin-top: 28px;
+    background: var(--success-bg);
+    border: 1px solid rgba(74, 222, 128, 0.2);
+    border-radius: 12px;
+    padding: 20px;
+  }
+
+  .done-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+  .done-title { font-size: 15px; font-weight: 700; color: var(--success); }
+  .pdf-size { font-size: 13px; color: var(--muted); }
+
+  .filename-row { margin-bottom: 14px; }
+  .filename-row label { color: var(--muted); margin-bottom: 6px; font-size: 12px; }
+  .filename-row input { font-size: 14px; padding: 10px 14px; }
+
+  .save-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: var(--success);
+    color: #0c1a10;
+    border: none;
+    border-radius: 10px;
+    padding: 13px;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    width: 100%;
+    transition: opacity 0.15s, transform 0.1s;
+  }
+  .save-btn:hover { opacity: 0.88; }
+  .save-btn:active { transform: scale(0.98); }
+
+  /* ── Error / Cancelled ── */
+  #error-box {
+    display: none;
+    margin-top: 20px;
+    background: var(--error-bg);
+    border: 1px solid rgba(248, 113, 113, 0.25);
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-size: 14px;
+    color: var(--error);
+  }
+
+  #cancelled-box {
+    display: none;
+    margin-top: 20px;
+    background: rgba(251, 191, 36, 0.07);
+    border: 1px solid rgba(251, 191, 36, 0.25);
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-size: 14px;
+    color: var(--warn);
+  }
+
+  .retry-btn {
+    margin-top: 12px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 10px;
+    border-radius: 8px;
+  }
+  .retry-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); opacity: 1; }
+
+  /* ── Footer ── */
+  .sites-note {
+    margin-top: 32px;
+    font-size: 12px;
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+    padding-top: 20px;
+    line-height: 1.7;
+  }
+  .sites-note strong { color: var(--text); }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div class="logo">Manhwa <span>Merger</span></div>
+  <div class="subtitle">Combine chapters into one continuous PDF</div>
+
+  <div class="field">
+    <label for="url">First chapter URL</label>
+    <input id="url" type="url" placeholder="https://mangafire.to/read/… or https://mangadex.org/chapter/…" autocomplete="off" />
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label for="count">Chapters to merge</label>
+      <input id="count" type="number" value="5" min="1" max="50" />
+      <div class="hint">1 – 50 chapters</div>
+    </div>
+  </div>
+
+  <button id="merge-btn" onclick="startMerge()">Merge chapters</button>
+
+  <!-- Error -->
+  <div id="error-box"></div>
+  <button class="retry-btn" id="error-retry" onclick="retryMerge()" style="display:none">↺ Try again</button>
+
+  <!-- Cancelled -->
+  <div id="cancelled-box">Download cancelled.</div>
+  <button class="retry-btn" id="cancel-retry" onclick="retryMerge()" style="display:none">↺ Try again</button>
+
+  <!-- Progress -->
+  <div id="progress-section">
+    <div class="progress-header">
+      <div class="status-text" id="status-text">Starting…</div>
+      <div class="pct-text" id="pct-text">0%</div>
+    </div>
+    <div class="bar-track"><div class="bar-fill" id="bar"></div></div>
+    <div class="cancel-wrap">
+      <button id="cancel-btn" onclick="cancelMerge()">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Done -->
+  <div id="done-section">
+    <div class="done-header">
+      <div class="done-title">✓ Done!</div>
+      <div class="pdf-size" id="pdf-size"></div>
+    </div>
+    <div class="filename-row">
+      <label for="filename">Save as</label>
+      <input id="filename" type="text" value="manhwa.pdf" spellcheck="false" />
+    </div>
+    <button class="save-btn" onclick="savePDF()">&#8595; Save PDF</button>
+  </div>
+
+  <div class="sites-note">
+    <strong>Full support:</strong> MangaFire &nbsp;·&nbsp; MangaDex &nbsp;·&nbsp; Comick.io &nbsp;·&nbsp; Webtoon<br>
+    <strong>Generic support</strong> (URL must contain <em>/chapter-N</em> or <em>/ep-N</em>): MangaReader, MangaHere, Asura Scans, Flame Comics, Toonily, manhwa18.cc, and most manga sites<br>
+    <strong>Not supported:</strong> Bato.to (non-sequential chapter IDs)
+  </div>
+</div>
+
+<script>
+  let pollTimer = null;
+  let currentJobId = null;
+  let currentCount = 5;
+
+  const STATUS_LABELS = {
+    queued:       "Queued…",
+    detecting:    "Detecting site…",
+    fetching_meta:"Fetching chapter info…",
+    downloading:  "Downloading chapters",
+    building_pdf: "Building PDF…",
+    done:         "Done!",
+    cancelled:    "Cancelled.",
+    error:        "Error",
+  };
+
+  function fmtSize(bytes) {
+    if (!bytes) return "";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  function setBar(pct) {
+    const p = Math.min(100, Math.round(pct));
+    document.getElementById("bar").style.width = p + "%";
+    document.getElementById("pct-text").textContent = p + "%";
+  }
+
+  function resetUI() {
+    clearInterval(pollTimer);
+    document.getElementById("error-box").style.display = "none";
+    document.getElementById("error-retry").style.display = "none";
+    document.getElementById("cancelled-box").style.display = "none";
+    document.getElementById("cancel-retry").style.display = "none";
+    document.getElementById("done-section").style.display = "none";
+    document.getElementById("progress-section").style.display = "none";
+    document.getElementById("cancel-btn").disabled = false;
+    document.getElementById("merge-btn").disabled = false;
+  }
+
+  function showError(msg) {
+    resetUI();
+    const box = document.getElementById("error-box");
+    box.textContent = "⚠ " + msg;
+    box.style.display = "block";
+    document.getElementById("error-retry").style.display = "block";
+  }
+
+  function showCancelled() {
+    resetUI();
+    document.getElementById("cancelled-box").style.display = "block";
+    document.getElementById("cancel-retry").style.display = "block";
+  }
+
+  async function retryMerge() {
+    resetUI();
+    await startMerge();
+  }
+
+  async function cancelMerge() {
+    if (!currentJobId) return;
+    document.getElementById("cancel-btn").disabled = true;
+    document.getElementById("cancel-btn").textContent = "Cancelling…";
+    await fetch(`/api/cancel/${currentJobId}`, { method: "POST" }).catch(() => {});
+  }
+
+  async function startMerge() {
+    const url = document.getElementById("url").value.trim();
+    const count = parseInt(document.getElementById("count").value) || 5;
+    currentCount = count;
+
+    if (!url) { showError("Please enter a chapter URL."); return; }
+
+    resetUI();
+    document.getElementById("progress-section").style.display = "block";
+    document.getElementById("status-text").textContent = "Starting…";
+    document.getElementById("merge-btn").disabled = true;
+    document.getElementById("cancel-btn").disabled = false;
+    document.getElementById("cancel-btn").textContent = "Cancel";
+    setBar(2);
+
+    const res = await fetch("/api/merge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, chapters: count }),
+    }).catch(() => null);
+
+    if (!res || !res.ok) {
+      showError("Failed to start merge. Is the server running?");
+      return;
+    }
+
+    const data = await res.json();
+    if (data.error) { showError(data.error); return; }
+    currentJobId = data.job_id;
+
+    pollTimer = setInterval(() => poll(currentJobId), 1200);
+  }
+
+  async function poll(jobId) {
+    const res = await fetch(`/api/status/${jobId}`).catch(() => null);
+    if (!res || !res.ok) return;
+
+    const d = await res.json();
+    const label = STATUS_LABELS[d.status] || d.status;
+
+    // Status label + bar
+    if (d.status === "queued" || d.status === "detecting") {
+      document.getElementById("status-text").textContent = label;
+      setBar(5);
+
+    } else if (d.status === "fetching_meta") {
+      document.getElementById("status-text").textContent = label;
+      setBar(15);
+
+    } else if (d.status === "downloading") {
+      const pct = d.total > 0 ? (d.progress / d.total) : 0;
+      document.getElementById("status-text").textContent =
+        `Downloading chapter ${d.progress} of ${d.total}…`;
+      setBar(20 + pct * 65);
+
+    } else if (d.status === "building_pdf") {
+      document.getElementById("status-text").textContent = label;
+      setBar(90);
+
+    } else if (d.status === "done") {
+      clearInterval(pollTimer);
+      setBar(100);
+      document.getElementById("progress-section").style.display = "none";
+
+      // Populate done section
+      document.getElementById("pdf-size").textContent = fmtSize(d.pdf_size);
+      document.getElementById("filename").value = d.suggested_filename || "manhwa.pdf";
+      document.getElementById("done-section").style.display = "block";
+      document.getElementById("merge-btn").disabled = false;
+
+    } else if (d.status === "cancelled") {
+      clearInterval(pollTimer);
+      showCancelled();
+
+    } else if (d.status === "error") {
+      clearInterval(pollTimer);
+      showError(d.error || "Something went wrong.");
+    }
+  }
+
+  async function savePDF() {
+    if (!currentJobId) return;
+    const filename = (document.getElementById("filename").value.trim() || "manhwa.pdf")
+      .replace(/\.pdf$/i, "") + ".pdf";
+    const url = `/api/download/${currentJobId}?name=${encodeURIComponent(filename)}`;
+
+    // Try the modern Save As picker first
+    if (window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: filename,
+          types: [{ description: "PDF Document", accept: { "application/pdf": [".pdf"] } }],
+        });
+        const res = await fetch(url);
+        const blob = await res.blob();
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        return;
+      } catch (err) {
+        if (err.name === "AbortError") return; // user dismissed picker — do nothing
+        // fall through to regular download
+      }
+    }
+
+    // Fallback: trigger browser download
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+  }
+</script>
+</body>
+</html>
