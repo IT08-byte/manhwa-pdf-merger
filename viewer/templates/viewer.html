@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Manhwa Viewer</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f0f13;
+    --surface: #1a1a24;
+    --border: #2a2a3a;
+    --accent: #7c6af7;
+    --text: #e8e8f0;
+    --muted: #888899;
+    --sidebar-w: 220px;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Top bar ── */
+  #topbar {
+    height: 48px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .logo { font-weight: 700; font-size: 15px; color: var(--accent); white-space: nowrap; }
+  #doc-title { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+
+  /* Page info — clickable for go-to-page */
+  #page-info-wrap { position: relative; white-space: nowrap; }
+  #page-info {
+    font-size: 13px;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 3px 6px;
+    border-radius: 4px;
+    transition: background 0.1s;
+  }
+  #page-info:hover { background: rgba(124,106,247,0.1); color: var(--text); }
+  #goto-input {
+    display: none;
+    width: 64px;
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 3px 8px;
+    text-align: center;
+    outline: none;
+  }
+  #goto-input.visible { display: inline-block; }
+
+  .tb-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 12px;
+    padding: 5px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .tb-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Zoom controls */
+  .zoom-group { display: flex; gap: 2px; align-items: center; }
+  .zoom-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text);
+    font-size: 14px;
+    width: 28px;
+    height: 28px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .zoom-btn:hover { border-color: var(--accent); color: var(--accent); }
+  #zoom-label { font-size: 12px; color: var(--muted); min-width: 42px; text-align: center; }
+
+  /* ── Layout ── */
+  #layout { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── Sidebar ── */
+  #sidebar {
+    width: var(--sidebar-w);
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+  }
+  #sidebar.hidden { display: none; }
+  #sidebar-header {
+    padding: 12px 14px 10px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  #chapter-list { overflow-y: auto; flex: 1; padding: 6px 0; }
+  .ch-item {
+    padding: 9px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+    color: var(--muted);
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ch-item:hover { background: rgba(124,106,247,0.08); color: var(--text); }
+  .ch-item.active { border-left-color: var(--accent); color: var(--text); background: rgba(124,106,247,0.12); font-weight: 600; }
+
+  /* ── Viewer scroll area ── */
+  #viewer-wrap {
+    flex: 1;
+    overflow-y: scroll;
+    overflow-x: auto;
+    background: #141418;
+    scroll-behavior: smooth;
+    position: relative;
+  }
+  #pages-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 0 80px;
+    gap: 4px;
+  }
+  .page-slot {
+    position: relative;
+    background: #1a1a20;
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .page-slot canvas { display: block; }
+  .page-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    color: var(--muted);
+    position: absolute;
+    inset: 0;
+  }
+
+  /* ── Drop zone ── */
+  #drop-zone {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #drop-zone.hidden { display: none; }
+  .drop-card {
+    background: var(--surface);
+    border: 2px dashed var(--border);
+    border-radius: 20px;
+    padding: 48px 64px;
+    text-align: center;
+    max-width: 420px;
+    transition: border-color 0.2s;
+  }
+  .drop-card.drag-over { border-color: var(--accent); }
+  .drop-icon { font-size: 48px; margin-bottom: 16px; }
+  .drop-title { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
+  .drop-sub { font-size: 14px; color: var(--muted); margin-bottom: 24px; line-height: 1.5; }
+  .drop-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 12px 28px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .drop-btn:hover { opacity: 0.85; }
+  .drop-note { font-size: 12px; color: var(--muted); margin-top: 14px; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <span class="logo">Manhwa Viewer</span>
+  <span id="doc-title">No file loaded</span>
+
+  <!-- Go-to-page -->
+  <div id="page-info-wrap">
+    <span id="page-info"></span>
+    <input id="goto-input" type="number" min="1" placeholder="pg" title="Go to page" />
+  </div>
+
+  <!-- Zoom controls -->
+  <div class="zoom-group" id="zoom-group" style="display:none">
+    <button class="zoom-btn" onclick="zoomOut()" title="Zoom out">−</button>
+    <span id="zoom-label">100%</span>
+    <button class="zoom-btn" onclick="zoomIn()" title="Zoom in">+</button>
+  </div>
+
+  <button class="tb-btn" id="toggle-sidebar-btn" onclick="toggleSidebar()" style="display:none">☰ Chapters</button>
+  <button class="tb-btn" onclick="triggerOpen()">Open PDF</button>
+</div>
+
+<div id="layout">
+  <div id="sidebar" class="hidden">
+    <div id="sidebar-header">Chapters</div>
+    <div id="chapter-list"></div>
+  </div>
+
+  <div id="viewer-wrap">
+    <div id="drop-zone">
+      <div class="drop-card" id="drop-card">
+        <div class="drop-icon">📖</div>
+        <div class="drop-title">Open your manga PDF</div>
+        <div class="drop-sub">Drop a PDF here or click to browse.<br>Works best with PDFs from Manhwa Merger.</div>
+        <button class="drop-btn" onclick="triggerOpen()">Choose PDF</button>
+        <div class="drop-note">Files are opened locally — nothing is sent to any server.</div>
+      </div>
+    </div>
+    <div id="pages-container"></div>
+  </div>
+</div>
+
+<input type="file" id="file-input" accept=".pdf,application/pdf" style="display:none" />
+
+<script type="module">
+import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const RENDER_AHEAD   = 3;
+const RENDER_BEHIND  = 1;
+const UNLOAD_AFTER   = 6;
+
+// Zoom presets: multiplier relative to fit-width (1.0 = fit-width)
+const ZOOM_LEVELS  = [1.0, 1.25, 1.5];
+const ZOOM_LABELS  = ["Fit", "125%", "150%"];
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let pdfDoc          = null;
+let totalPages      = 0;
+let outline         = [];
+let activeChapterIdx = -1;
+let currentFilename = "";
+let fitWidthScale   = 1;   // computed from viewer width + page width
+let zoomIdx         = 0;   // index into ZOOM_LEVELS
+
+const rendered   = new Set();
+const rendering  = new Set();
+let renderQueue  = [];
+let visiblePages = new Set();
+let iObserver    = null;
+let draining     = false;
+
+// ── Public callbacks ──────────────────────────────────────────────────────────
+window.triggerOpen  = () => document.getElementById("file-input").click();
+window.toggleSidebar = toggleSidebar;
+window.zoomIn  = () => applyZoom(Math.min(zoomIdx + 1, ZOOM_LEVELS.length - 1));
+window.zoomOut = () => applyZoom(Math.max(zoomIdx - 1, 0));
+
+// ── File input ────────────────────────────────────────────────────────────────
+document.getElementById("file-input").addEventListener("change", function() {
+  if (this.files[0]) { loadFile(this.files[0]); this.value = ""; }
+});
+
+// ── Drag and drop ─────────────────────────────────────────────────────────────
+const dropCard   = document.getElementById("drop-card");
+const viewerWrap = document.getElementById("viewer-wrap");
+
+viewerWrap.addEventListener("dragover",  e => { e.preventDefault(); dropCard.classList.add("drag-over"); });
+viewerWrap.addEventListener("dragleave", () => dropCard.classList.remove("drag-over"));
+viewerWrap.addEventListener("drop", e => {
+  e.preventDefault();
+  dropCard.classList.remove("drag-over");
+  if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+});
+
+// ── Keyboard navigation ───────────────────────────────────────────────────────
+document.addEventListener("keydown", e => {
+  // Skip if focus is inside a text/number input
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA") return;
+  if (!totalPages) return;
+
+  if (e.key === "ArrowDown" || e.key === "PageDown") {
+    e.preventDefault();
+    navigatePage(1);
+  } else if (e.key === "ArrowUp" || e.key === "PageUp") {
+    e.preventDefault();
+    navigatePage(-1);
+  }
+});
+
+function navigatePage(delta) {
+  const currentPage = getFirstVisiblePage();
+  const targetPage  = Math.max(1, Math.min(totalPages, currentPage + delta));
+  jumpToPage(targetPage);
+}
+
+function getFirstVisiblePage() {
+  const wrapTop = viewerWrap.getBoundingClientRect().top;
+  for (const slot of document.querySelectorAll(".page-slot")) {
+    if (slot.getBoundingClientRect().bottom > wrapTop + 10) {
+      return parseInt(slot.dataset.page, 10);
+    }
+  }
+  return 1;
+}
+
+function jumpToPage(pageNum) {
+  const slot = document.querySelector(`.page-slot[data-page="${pageNum}"]`);
+  if (slot) slot.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ── Go-to-page ────────────────────────────────────────────────────────────────
+const pageInfoEl = document.getElementById("page-info");
+const gotoInput  = document.getElementById("goto-input");
+
+pageInfoEl.addEventListener("click", () => {
+  if (!totalPages) return;
+  gotoInput.value = String(getFirstVisiblePage());
+  pageInfoEl.style.display = "none";
+  gotoInput.classList.add("visible");
+  gotoInput.focus();
+  gotoInput.select();
+});
+
+gotoInput.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const n = parseInt(gotoInput.value, 10);
+    if (!isNaN(n)) jumpToPage(Math.max(1, Math.min(totalPages, n)));
+    closeGotoInput();
+  } else if (e.key === "Escape") {
+    closeGotoInput();
+  }
+});
+
+gotoInput.addEventListener("blur", () => closeGotoInput());
+
+function closeGotoInput() {
+  gotoInput.classList.remove("visible");
+  pageInfoEl.style.display = "";
+}
+
+// ── Load file ─────────────────────────────────────────────────────────────────
+async function loadFile(file) {
+  const buf = await file.arrayBuffer();
+  await openPdf(new Uint8Array(buf), file.name);
+}
+
+async function openPdf(data, name) {
+  // Save position for previously open file
+  savePosition();
+
+  if (pdfDoc) { pdfDoc.destroy(); pdfDoc = null; }
+  totalPages = 0;
+  outline    = [];
+  activeChapterIdx = -1;
+  currentFilename  = name;
+  zoomIdx = 0;
+
+  rendered.clear();
+  rendering.clear();
+  renderQueue  = [];
+  visiblePages = new Set();
+  if (iObserver) { iObserver.disconnect(); iObserver = null; }
+
+  clearChildren(document.getElementById("pages-container"));
+  clearChildren(document.getElementById("chapter-list"));
+
+  pdfDoc     = await pdfjsLib.getDocument({ data }).promise;
+  totalPages = pdfDoc.numPages;
+
+  document.getElementById("doc-title").textContent = name;
+  document.getElementById("drop-zone").classList.add("hidden");
+  document.getElementById("toggle-sidebar-btn").style.display = "";
+  document.getElementById("zoom-group").style.display = "";
+  updateZoomLabel();
+  updatePageInfo(1);
+
+  await loadOutline();
+  await buildSlots();
+  startObserver();
+
+  // Restore last reading position
+  restorePosition();
+}
+
+// ── Outline ───────────────────────────────────────────────────────────────────
+async function loadOutline() {
+  try {
+    const raw = await pdfDoc.getOutline();
+    if (!raw || raw.length === 0) return;
+    const resolved = [];
+    for (const item of raw) {
+      try {
+        const dest = item.dest;
+        let pageNum = null;
+        if (Array.isArray(dest)) {
+          pageNum = (await pdfDoc.getPageIndex(dest[0])) + 1;
+        } else if (typeof dest === "string") {
+          const d = await pdfDoc.getDestination(dest);
+          if (d) pageNum = (await pdfDoc.getPageIndex(d[0])) + 1;
+        }
+        if (pageNum) resolved.push({ title: item.title, page: pageNum });
+      } catch (_) { /* skip unresolvable */ }
+    }
+    outline = resolved;
+    buildChapterList();
+  } catch (_) { /* no outline */ }
+}
+
+function buildChapterList() {
+  const list = document.getElementById("chapter-list");
+  clearChildren(list);
+  if (outline.length === 0) {
+    document.getElementById("sidebar").classList.add("hidden");
+    document.getElementById("toggle-sidebar-btn").style.display = "none";
+    return;
+  }
+  document.getElementById("sidebar").classList.remove("hidden");
+  outline.forEach((ch, i) => {
+    const el = document.createElement("div");
+    el.className    = "ch-item";
+    el.textContent  = ch.title;
+    el.dataset.idx  = i;
+    el.addEventListener("click", () => jumpToChapter(i));
+    list.appendChild(el);
+  });
+}
+
+function jumpToChapter(idx) {
+  const ch = outline[idx];
+  if (ch) jumpToPage(ch.page);
+}
+
+function setActiveChapter(pageNum) {
+  let newIdx = -1;
+  for (let i = 0; i < outline.length; i++) {
+    if (outline[i].page <= pageNum) newIdx = i;
+    else break;
+  }
+  if (newIdx === activeChapterIdx) return;
+  activeChapterIdx = newIdx;
+  document.querySelectorAll(".ch-item").forEach((el, i) => el.classList.toggle("active", i === newIdx));
+  if (newIdx >= 0) {
+    const active = document.querySelector(".ch-item.active");
+    if (active) active.scrollIntoView({ block: "nearest" });
+  }
+}
+
+// ── Zoom ──────────────────────────────────────────────────────────────────────
+function applyZoom(newIdx) {
+  if (newIdx === zoomIdx) return;
+  zoomIdx = newIdx;
+  updateZoomLabel();
+
+  // Recompute all slot dimensions and re-render visible pages
+  const scale = fitWidthScale * ZOOM_LEVELS[zoomIdx];
+  document.querySelectorAll(".page-slot").forEach(slot => {
+    slot.dataset.scale = scale;
+    // Clear canvas so it re-renders at new scale
+    const canvas = slot.querySelector("canvas");
+    if (canvas) { canvas.width = 0; canvas.height = 0; canvas.remove(); }
+    const ph = slot.querySelector(".page-placeholder");
+    if (ph) ph.style.display = "";
+  });
+  rendered.clear();
+  renderQueue = [];
+  scheduleWindow();
+}
+
+function updateZoomLabel() {
+  document.getElementById("zoom-label").textContent = ZOOM_LABELS[zoomIdx];
+}
+
+// ── Page slot skeleton ────────────────────────────────────────────────────────
+async function buildSlots() {
+  const container = document.getElementById("pages-container");
+  const firstPage = await pdfDoc.getPage(1);
+  const vp        = firstPage.getViewport({ scale: 1 });
+  const viewW     = Math.max(300, viewerWrap.clientWidth - 48);
+  fitWidthScale   = Math.min(viewW / vp.width, 2.5);
+  const scale     = fitWidthScale * ZOOM_LEVELS[zoomIdx];
+  const W = Math.round(vp.width  * scale);
+  const H = Math.round(vp.height * scale);
+
+  for (let p = 1; p <= totalPages; p++) {
+    const slot = document.createElement("div");
+    slot.className   = "page-slot";
+    slot.dataset.page  = p;
+    slot.dataset.scale = scale;
+    slot.style.width   = W + "px";
+    slot.style.height  = H + "px";
+    const ph = document.createElement("div");
+    ph.className  = "page-placeholder";
+    ph.textContent = String(p);
+    slot.appendChild(ph);
+    container.appendChild(slot);
+  }
+}
+
+// ── IntersectionObserver ──────────────────────────────────────────────────────
+function startObserver() {
+  iObserver = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      const p = parseInt(e.target.dataset.page, 10);
+      if (e.isIntersecting) visiblePages.add(p);
+      else visiblePages.delete(p);
+    }
+    scheduleWindow();
+  }, { root: viewerWrap, rootMargin: "300px 0px" });
+
+  document.querySelectorAll(".page-slot").forEach(s => iObserver.observe(s));
+  viewerWrap.addEventListener("scroll", onScroll, { passive: true });
+  viewerWrap.addEventListener("scroll", savePositionDebounced, { passive: true });
+}
+
+function scheduleWindow() {
+  if (visiblePages.size === 0) return;
+  const min = Math.min(...visiblePages);
+  const max = Math.max(...visiblePages);
+
+  updatePageInfo(min);
+  setActiveChapter(min);
+
+  const keepFrom = Math.max(1, min - RENDER_BEHIND);
+  const keepTo   = Math.min(totalPages, max + RENDER_AHEAD);
+
+  for (let p = keepFrom; p <= keepTo; p++) {
+    if (!rendered.has(p) && !rendering.has(p)) renderQueue.push(p);
+  }
+  renderQueue = [...new Set(renderQueue)].sort((a, b) => Math.abs(a - min) - Math.abs(b - min));
+
+  for (const p of [...rendered]) {
+    if (p < keepFrom - UNLOAD_AFTER || p > keepTo + UNLOAD_AFTER) unloadPage(p);
+  }
+  drainQueue();
+}
+
+function onScroll() {
+  const wrapTop = viewerWrap.getBoundingClientRect().top;
+  for (const slot of document.querySelectorAll(".page-slot")) {
+    if (slot.getBoundingClientRect().bottom > wrapTop + 40) {
+      const p = parseInt(slot.dataset.page, 10);
+      updatePageInfo(p);
+      setActiveChapter(p);
+      break;
+    }
+  }
+}
+
+// ── Render / unload ───────────────────────────────────────────────────────────
+async function drainQueue() {
+  if (draining) return;
+  draining = true;
+  while (renderQueue.length > 0) {
+    const p = renderQueue.shift();
+    if (!rendered.has(p) && !rendering.has(p)) await renderPage(p);
+  }
+  draining = false;
+}
+
+async function renderPage(pageNum) {
+  const slot = document.querySelector(`.page-slot[data-page="${pageNum}"]`);
+  if (!slot || rendered.has(pageNum)) return;
+  rendering.add(pageNum);
+  try {
+    const page  = await pdfDoc.getPage(pageNum);
+    const scale = parseFloat(slot.dataset.scale);
+    const vp    = page.getViewport({ scale });
+
+    let canvas = slot.querySelector("canvas");
+    if (!canvas) { canvas = document.createElement("canvas"); slot.appendChild(canvas); }
+    canvas.width  = Math.round(vp.width);
+    canvas.height = Math.round(vp.height);
+    slot.style.width  = canvas.width  + "px";
+    slot.style.height = canvas.height + "px";
+
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+
+    const ph = slot.querySelector(".page-placeholder");
+    if (ph) ph.style.display = "none";
+    rendered.add(pageNum);
+  } catch (err) {
+    console.warn("render error page", pageNum, err);
+  } finally {
+    rendering.delete(pageNum);
+  }
+}
+
+function unloadPage(pageNum) {
+  const slot = document.querySelector(`.page-slot[data-page="${pageNum}"]`);
+  if (!slot) return;
+  const canvas = slot.querySelector("canvas");
+  if (canvas) { canvas.width = 0; canvas.height = 0; canvas.remove(); }
+  const ph = slot.querySelector(".page-placeholder");
+  if (ph) ph.style.display = "";
+  rendered.delete(pageNum);
+}
+
+// ── localStorage position memory ──────────────────────────────────────────────
+let saveTimer = null;
+
+function savePositionDebounced() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(savePosition, 800);
+}
+
+function savePosition() {
+  if (!currentFilename || !totalPages) return;
+  try {
+    const page = getFirstVisiblePage();
+    const stored = JSON.parse(localStorage.getItem("manhwa-positions") || "{}");
+    stored[currentFilename] = page;
+    localStorage.setItem("manhwa-positions", JSON.stringify(stored));
+  } catch (_) { /* localStorage unavailable */ }
+}
+
+function restorePosition() {
+  try {
+    const stored = JSON.parse(localStorage.getItem("manhwa-positions") || "{}");
+    const page = stored[currentFilename];
+    if (page && page > 1) {
+      // Delay to let slots layout before scrolling
+      setTimeout(() => jumpToPage(page), 300);
+    }
+  } catch (_) { /* ignore */ }
+}
+
+window.addEventListener("beforeunload", savePosition);
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function updatePageInfo(p) {
+  pageInfoEl.textContent = totalPages ? `Page ${p} / ${totalPages}` : "";
+}
+
+function toggleSidebar() {
+  document.getElementById("sidebar").classList.toggle("hidden");
+}
+
+function clearChildren(el) {
+  while (el.firstChild) el.removeChild(el.firstChild);
+}
+</script>
+</body>
+</html>
