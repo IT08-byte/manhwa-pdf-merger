@@ -1,4 +1,5 @@
 import io
+import logging
 import os
 import re
 import shutil
@@ -7,13 +8,23 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 from flask import Flask, jsonify, render_template, request, send_file
 from PIL import Image
+from werkzeug.utils import secure_filename
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
+
+PARALLEL_CHAPTERS = 4   # concurrent gallery-dl subprocesses
+PARALLEL_IMAGES = 8     # concurrent image HTTP fetches (MangaDex)
+PARALLEL_CONVERT = 4    # concurrent JPEG conversion workers
 
 HEADERS = {
     "User-Agent": (
@@ -25,6 +36,52 @@ HEADERS = {
 
 jobs: Dict[str, dict] = {}
 jobs_lock = threading.Lock()
+
+JOB_TTL = 7200  # seconds — jobs older than 2h are auto-cleaned
+
+
+ALLOWED_DOMAINS = {
+    "mangadex.org", "mangafire.to", "comick.io", "webtoons.com",
+    "toonily.com", "asurascans.com", "asuracomic.net", "manhwa18.cc",
+    "manganato.com", "chapmanganato.to", "mangakakalot.com",
+    "manhuafast.com", "manhuascan.io", "topmanhua.com",
+    "reaperscans.com", "flamecomics.xyz", "luminousscans.com",
+}
+
+MAX_CONCURRENT_JOBS = 5
+MAX_PDF_BYTES = 500 * 1024 * 1024  # 500 MB
+
+
+def _validate_url(url: str) -> Optional[str]:
+    """Return an error string if the URL domain is not allowed, or None if safe."""
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower().removeprefix("www.")
+        if not hostname:
+            return "Invalid URL: no hostname."
+        # Check exact match or subdomain match against allowlist
+        if not any(hostname == d or hostname.endswith("." + d) for d in ALLOWED_DOMAINS):
+            return (
+                f"Domain '{hostname}' is not supported. "
+                "Supported: MangaDex, MangaFire, Comick, Webtoons, and other major manga sites."
+            )
+    except Exception:
+        return "Invalid URL."
+    return None
+
+
+def _cleanup_old_jobs() -> None:
+    """Daemon thread: remove jobs older than JOB_TTL every 10 minutes."""
+    while True:
+        time.sleep(600)
+        cutoff = time.time() - JOB_TTL
+        with jobs_lock:
+            stale = [jid for jid, j in jobs.items() if j.get("created_at", 0) < cutoff]
+            for jid in stale:
+                jobs.pop(jid, None)
+
+
+threading.Thread(target=_cleanup_old_jobs, daemon=True).start()
 
 
 # ── MangaDex ──────────────────────────────────────────────────────────────────
@@ -144,6 +201,36 @@ def _gallery_dl_path() -> str:
     )
 
 
+def _run_gallery_dl(
+    gdl: str,
+    chap_url: str,
+    chap_dir: str,
+    cancel_event: Optional[threading.Event] = None,
+) -> Tuple[List[str], str]:
+    """Run gallery-dl for one chapter; return (sorted_image_paths, stderr_text)."""
+    os.makedirs(chap_dir, exist_ok=True)
+    proc = subprocess.Popen(
+        [gdl, "--dest", chap_dir,
+         "--filename", "{chapter:>04}_{page:>04}.{extension}",
+         chap_url],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    while proc.poll() is None:
+        if cancel_event and cancel_event.is_set():
+            proc.terminate()
+            raise InterruptedError("Cancelled by user.")
+        time.sleep(0.25)
+
+    imgs = sorted([
+        os.path.join(root, f)
+        for root, _, files in os.walk(chap_dir)
+        for f in files
+        if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+    ])
+    stderr = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace")
+    return imgs, stderr
+
+
 def _suggest_filename(url: str, start_chap: str, count: int) -> str:
     """Generate a human-readable PDF filename from the chapter URL."""
     slug = "manhwa"
@@ -218,46 +305,28 @@ def mangafire_download_images(
         raise ValueError("No chapters found to download.")
 
     gdl = _gallery_dl_path()
-    all_images: List[str] = []
+    results: List[Optional[List[str]]] = [None] * len(selected)
 
-    for chap_num, href in selected:
-        if cancel_event and cancel_event.is_set():
-            raise InterruptedError("Cancelled by user.")
-
+    def _fetch(idx: int) -> List[str]:
+        chap_num, href = selected[idx]
         chap_url = f"https://mangafire.to{href}" if href.startswith("/") else href
         chap_dir = os.path.join(tmp_dir, f"ch_{chap_num}")
-        os.makedirs(chap_dir, exist_ok=True)
+        imgs, stderr = _run_gallery_dl(gdl, chap_url, chap_dir, cancel_event)
+        if not imgs:
+            raise RuntimeError(f"gallery-dl failed for chapter {chap_num}:\n{stderr[-400:]}")
+        return imgs
 
-        # Use Popen so we can kill it on cancel
-        proc = subprocess.Popen(
-            [gdl, "--dest", chap_dir,
-             "--filename", "{chapter:>04}_{page:>04}.{extension}",
-             chap_url],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        while proc.poll() is None:
+    with ThreadPoolExecutor(max_workers=PARALLEL_CHAPTERS) as ex:
+        future_map = {ex.submit(_fetch, i): i for i in range(len(selected))}
+        for fut in as_completed(future_map):
             if cancel_event and cancel_event.is_set():
-                proc.terminate()
                 raise InterruptedError("Cancelled by user.")
-            time.sleep(0.5)
+            idx = future_map[fut]
+            results[idx] = fut.result()  # raises on error
+            if progress_cb:
+                progress_cb()
 
-        imgs: List[str] = []
-        for root, _, files in os.walk(chap_dir):
-            for f in files:
-                if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                    imgs.append(os.path.join(root, f))
-        imgs.sort()
-
-        if not imgs and proc.returncode != 0:
-            stderr = (proc.stderr.read() or b"").decode(errors="replace")
-            raise RuntimeError(f"gallery-dl failed for chapter {chap_num}:\n{stderr[-500:]}")
-
-        all_images.extend(imgs)
-        if progress_cb:
-            progress_cb()
-        time.sleep(0.5)
-
-    return all_images
+    return [img for imgs in results if imgs for img in imgs]
 
 
 # ── Comick.io ─────────────────────────────────────────────────────────────────
@@ -347,45 +416,33 @@ def comick_download_images(
         raise ValueError("No chapters found on Comick.io.")
 
     gdl = _gallery_dl_path()
-    all_images: List[str] = []
+    results: List[Optional[List[str]]] = [None] * len(chapter_urls)
 
-    for i, chap_url in enumerate(chapter_urls):
-        if cancel_event and cancel_event.is_set():
-            raise InterruptedError("Cancelled by user.")
-
-        chap_dir = os.path.join(tmp_dir, f"ch_{i+1:04d}")
-        os.makedirs(chap_dir, exist_ok=True)
-
-        proc = subprocess.Popen(
-            [gdl, "--dest", chap_dir,
-             "--filename", "{chapter:>04}_{page:>04}.{extension}",
-             chap_url],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        while proc.poll() is None:
-            if cancel_event and cancel_event.is_set():
-                proc.terminate()
-                raise InterruptedError("Cancelled by user.")
-            time.sleep(0.5)
-
-        imgs: List[str] = []
-        for root, _, files in os.walk(chap_dir):
-            for f in files:
-                if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                    imgs.append(os.path.join(root, f))
-        imgs.sort()
-
+    def _fetch(idx: int) -> List[str]:
+        chap_dir = os.path.join(tmp_dir, f"ch_{idx+1:04d}")
+        imgs, stderr = _run_gallery_dl(gdl, chapter_urls[idx], chap_dir, cancel_event)
         if not imgs:
-            stderr_out = (proc.stderr.read() or b"").decode(errors="replace")
-            if i == 0:
-                raise RuntimeError(f"Failed to download from Comick.io:\n{stderr_out[-400:]}")
-            break  # Later chapters may not exist yet
+            if idx == 0:
+                raise RuntimeError(f"Failed to download from Comick.io:\n{stderr[-400:]}")
+            return []  # later chapters may not exist yet
+        return imgs
 
+    with ThreadPoolExecutor(max_workers=PARALLEL_CHAPTERS) as ex:
+        future_map = {ex.submit(_fetch, i): i for i in range(len(chapter_urls))}
+        for fut in as_completed(future_map):
+            if cancel_event and cancel_event.is_set():
+                raise InterruptedError("Cancelled by user.")
+            idx = future_map[fut]
+            results[idx] = fut.result()
+            if progress_cb and results[idx]:
+                progress_cb()
+
+    # Trim trailing missing chapters (gaps shouldn't happen but be safe)
+    all_images: List[str] = []
+    for imgs in results:
+        if not imgs:
+            break
         all_images.extend(imgs)
-        if progress_cb:
-            progress_cb()
-        time.sleep(0.5)
-
     return all_images
 
 
@@ -518,81 +575,104 @@ def generic_download_images(
     URL to navigate between chapters.
     """
     gdl = _gallery_dl_path()
-    all_images: List[str] = []
 
-    for i in range(count):
-        if cancel_event and cancel_event.is_set():
-            raise InterruptedError("Cancelled by user.")
-
-        chap_url = _increment_chapter_url(url, i)
-        if chap_url is None:
-            raise ValueError(
-                "Could not detect a chapter number in this URL. "
-                "Make sure it contains a pattern like /chapter-1 or /ch-1."
-            )
-
-        chap_dir = os.path.join(tmp_dir, f"ch_{i+1:04d}")
-        os.makedirs(chap_dir, exist_ok=True)
-
-        # ── Try gallery-dl ──────────────────────────────────────────────────
-        proc = subprocess.Popen(
-            [gdl, "--dest", chap_dir,
-             "--filename", "{chapter:>04}_{page:>04}.{extension}",
-             chap_url],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    # Probe chapter 0 first to detect HTML-scrape fallback sites
+    chap_url_0 = _increment_chapter_url(url, 0)
+    if chap_url_0 is None:
+        raise ValueError(
+            "Could not detect a chapter number in this URL. "
+            "Make sure it contains a pattern like /chapter-1 or /ch-1."
         )
-        while proc.poll() is None:
+    chap_dir_0 = os.path.join(tmp_dir, "ch_0001")
+    imgs_0, stderr_0 = _run_gallery_dl(gdl, chap_url_0, chap_dir_0, cancel_event)
+
+    if not imgs_0 and "Unsupported URL" in stderr_0:
+        # HTML scrape path — parallelize individual image downloads per chapter
+        all_images: List[str] = []
+        for i in range(count):
             if cancel_event and cancel_event.is_set():
-                proc.terminate()
                 raise InterruptedError("Cancelled by user.")
-            time.sleep(0.5)
-
-        gdl_stderr = (proc.stderr.read() or b"").decode(errors="replace")
-
-        imgs: List[str] = []
-        for root, _, files in os.walk(chap_dir):
-            for f in files:
-                if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                    imgs.append(os.path.join(root, f))
-        imgs.sort()
-
-        # ── gallery-dl didn't work — try HTML scraping ──────────────────────
-        if not imgs and "Unsupported URL" in gdl_stderr:
+            chap_url = _increment_chapter_url(url, i)
+            if chap_url is None:
+                break
+            chap_dir = os.path.join(tmp_dir, f"ch_{i+1:04d}")
+            os.makedirs(chap_dir, exist_ok=True)
             scraped_urls = html_scrape_chapter_images(chap_url)
-            if scraped_urls:
-                for j, img_url in enumerate(scraped_urls):
-                    img_data = download_image_as_jpeg(img_url)
+            if not scraped_urls:
+                if i == 0:
+                    raise RuntimeError(
+                        "This site isn't supported by gallery-dl and no images "
+                        "could be found in the page HTML either.\n"
+                        "Try a URL from MangaFire, MangaDex, Comick, MangaReader, "
+                        "Asura Scans, or another well-known site."
+                    )
+                break
+
+            # Download each chapter's images in parallel
+            page_results: List[Optional[bytes]] = [None] * len(scraped_urls)
+
+            def _fetch_img(j: int, img_url: str = scraped_urls[j]) -> bytes:  # type: ignore[misc]
+                return download_image_as_jpeg(img_url, cancel_event)
+
+            with ThreadPoolExecutor(max_workers=PARALLEL_IMAGES) as ex:
+                img_futures = {ex.submit(_fetch_img, j): j for j in range(len(scraped_urls))}
+                for fut in as_completed(img_futures):
+                    page_results[img_futures[fut]] = fut.result()
+
+            chapter_imgs: List[str] = []
+            for j, data in enumerate(page_results):
+                if data:
                     img_path = os.path.join(chap_dir, f"page_{j+1:04d}.jpg")
                     with open(img_path, "wb") as fh:
-                        fh.write(img_data)
-                    imgs.append(img_path)
-            elif i == 0:
-                raise RuntimeError(
-                    f"This site isn't supported by gallery-dl and no images could be "
-                    f"found in the page HTML either.\n"
-                    f"Try a URL from MangaFire, MangaDex, Comick, MangaReader, Asura Scans, "
-                    f"or another well-known site."
-                )
+                        fh.write(data)
+                    chapter_imgs.append(img_path)
+            all_images.extend(chapter_imgs)
+            if progress_cb:
+                progress_cb()
 
-        # ── gallery-dl failed for a non-"unsupported" reason ───────────────
-        elif not imgs and proc.returncode != 0 and i == 0:
-            raise RuntimeError(
-                f"gallery-dl could not download from this URL.\n"
-                f"Details: {gdl_stderr[-400:]}"
-            )
+        if not all_images:
+            raise RuntimeError("No images downloaded. Check the URL and try again.")
+        return all_images
 
-        # ── Chapter just doesn't exist (later in a series) ─────────────────
-        elif not imgs:
+    elif not imgs_0:
+        raise RuntimeError(
+            f"gallery-dl could not download from this URL.\n"
+            f"Details: {stderr_0[-400:]}"
+        )
+
+    # gallery-dl works — download all chapters in parallel
+    results: List[Optional[List[str]]] = [None] * count
+    results[0] = imgs_0
+    if progress_cb:
+        progress_cb()
+
+    def _fetch_chapter(i: int) -> List[str]:
+        chap_url = _increment_chapter_url(url, i)
+        if chap_url is None:
+            return []
+        chap_dir = os.path.join(tmp_dir, f"ch_{i+1:04d}")
+        imgs, _ = _run_gallery_dl(gdl, chap_url, chap_dir, cancel_event)
+        return imgs
+
+    if count > 1:
+        with ThreadPoolExecutor(max_workers=PARALLEL_CHAPTERS) as ex:
+            future_map = {ex.submit(_fetch_chapter, i): i for i in range(1, count)}
+            for fut in as_completed(future_map):
+                if cancel_event and cancel_event.is_set():
+                    raise InterruptedError("Cancelled by user.")
+                idx = future_map[fut]
+                results[idx] = fut.result()
+                if progress_cb and results[idx]:
+                    progress_cb()
+
+    all_images = []
+    for imgs in results:
+        if not imgs:
             break
-
         all_images.extend(imgs)
-        if progress_cb:
-            progress_cb()
-        time.sleep(0.5)
 
     if not all_images:
         raise RuntimeError("No images downloaded. Check the URL and try again.")
-
     return all_images
 
 
@@ -622,18 +702,45 @@ def file_to_jpeg(path: str) -> bytes:
 
 # ── PDF builder ───────────────────────────────────────────────────────────────
 
-def build_pdf(jpegs: List[bytes]) -> bytes:
+def build_pdf(jpegs: List[bytes], chapter_page_map: Optional[List[Tuple[str, int]]] = None) -> bytes:
+    """
+    Build a PDF from a list of JPEG bytes.
+    chapter_page_map: list of (chapter_label, 1-based page index) marking chapter starts.
+    These become PDF outline bookmarks visible in any PDF viewer's sidebar.
+    """
     from reportlab.pdfgen import canvas
     from reportlab.lib.utils import ImageReader
 
     buf = io.BytesIO()
     c = canvas.Canvas(buf)
-    for jpeg_bytes in jpegs:
+
+    # Map from 1-based page number → bookmark key
+    bookmark_pages: dict = {}
+    if chapter_page_map:
+        for label, page_1based in chapter_page_map:
+            key = f"ch_{page_1based}"
+            bookmark_pages[page_1based] = (key, label)
+
+    for i, jpeg_bytes in enumerate(jpegs):
+        page_num = i + 1
         img = Image.open(io.BytesIO(jpeg_bytes))
         w, h = img.size
         c.setPageSize((w, h))
         c.drawImage(ImageReader(io.BytesIO(jpeg_bytes)), 0, 0, w, h)
+
+        # Add a named destination at the top of this page
+        if page_num in bookmark_pages:
+            key, label = bookmark_pages[page_num]
+            c.bookmarkPage(key, fit="XYZ", top=h)
+
         c.showPage()
+
+    # Add outline entries after all pages are drawn
+    if chapter_page_map:
+        for label, page_1based in chapter_page_map:
+            key = f"ch_{page_1based}"
+            c.addOutlineEntry(label, key, level=0, closed=False)
+
     c.save()
     buf.seek(0)
     return buf.read()
@@ -644,6 +751,7 @@ def build_pdf(jpegs: List[bytes]) -> bytes:
 def merge_job(job_id: str, chapter_url: str, chapter_count: int) -> None:
     with jobs_lock:
         cancel_event = jobs[job_id]["cancel_event"]
+        jobs[job_id]["started_at"] = time.time()
 
     def update(status=None, progress=None, total=None, error=None, pdf=None):
         with jobs_lock:
@@ -652,6 +760,14 @@ def merge_job(job_id: str, chapter_url: str, chapter_count: int) -> None:
                 j["status"] = status
             if progress is not None:
                 j["progress"] = progress
+                # Recompute ETA whenever progress advances
+                started = j.get("started_at")
+                if started and progress > 0 and j["total"] > 0:
+                    elapsed = time.time() - started
+                    remaining = j["total"] - progress
+                    j["eta_seconds"] = int((elapsed / progress) * remaining)
+                else:
+                    j["eta_seconds"] = None
             if total is not None:
                 j["total"] = total
             if error is not None:
@@ -659,6 +775,7 @@ def merge_job(job_id: str, chapter_url: str, chapter_count: int) -> None:
             if pdf is not None:
                 j["pdf_bytes"] = pdf
                 j["pdf_size"] = len(pdf)
+                j["eta_seconds"] = None
 
     tmp_dir = None
     try:
@@ -698,6 +815,9 @@ def merge_job(job_id: str, chapter_url: str, chapter_count: int) -> None:
             downloaded[0] += 1
             update(progress=downloaded[0])
 
+        # chapter_page_map: [(label, 1-based page index)] for PDF bookmarks
+        chapter_page_map: List[Tuple[str, int]] = []
+
         if "bato.to" in chapter_url:
             raise ValueError(
                 "Bato.to uses non-sequential chapter IDs that can't be "
@@ -709,38 +829,135 @@ def merge_job(job_id: str, chapter_url: str, chapter_count: int) -> None:
             update(status="fetching_meta")
             image_urls = mangadex_get_all_image_urls(chapter_url, chapter_count)
             update(status="downloading", progress=0, total=len(image_urls))
-            jpegs: List[bytes] = []
-            for i, img_url in enumerate(image_urls):
-                jpegs.append(download_image_as_jpeg(img_url, cancel_event))
-                update(progress=i + 1)
+            jpegs_map: List[Optional[bytes]] = [None] * len(image_urls)
+            done_count = [0]
+
+            def _fetch_md(i: int) -> bytes:
+                return download_image_as_jpeg(image_urls[i], cancel_event)
+
+            with ThreadPoolExecutor(max_workers=PARALLEL_IMAGES) as ex:
+                fut_map = {ex.submit(_fetch_md, i): i for i in range(len(image_urls))}
+                for fut in as_completed(fut_map):
+                    if cancel_event and cancel_event.is_set():
+                        raise InterruptedError("Cancelled by user.")
+                    jpegs_map[fut_map[fut]] = fut.result()
+                    done_count[0] += 1
+                    update(progress=done_count[0])
+
+            jpegs: List[bytes] = [b for b in jpegs_map if b is not None]
+            # MangaDex returns all images flat — we track chapter starts by
+            # re-fetching metadata so we can label them
+            try:
+                chapter_id = parse_mangadex_url(chapter_url)
+                if not chapter_id:
+                    raise ValueError("No chapter ID")
+                meta = md_chapter_meta(chapter_id)
+                ch_ids = md_next_chapters(meta["manga_id"], meta["chapter"], meta["lang"], chapter_count)
+                page_cursor = 1
+                for idx, cid in enumerate(ch_ids):
+                    ch_num = float(meta["chapter"]) + idx
+                    label = f"Chapter {int(ch_num) if ch_num == int(ch_num) else ch_num}"
+                    chapter_page_map.append((label, page_cursor))
+                    page_cursor += len(md_chapter_images(cid))
+            except Exception:
+                pass  # bookmarks are best-effort
 
         elif "mangafire.to" in chapter_url:
             update(status="fetching_meta")
             update(status="downloading", progress=0, total=chapter_count)
+            parsed_mf = parse_mangafire_url(chapter_url)
+            start_num_mf = float(parsed_mf[3]) if parsed_mf else 1.0
             img_paths = mangafire_download_images(
                 chapter_url, chapter_count, tmp_dir, on_chapter_done, cancel_event
             )
-            jpegs = [file_to_jpeg(p) for p in img_paths]
+            update(status="building_pdf")
+            jpeg_map: List[Optional[bytes]] = [None] * len(img_paths)
+            with ThreadPoolExecutor(max_workers=PARALLEL_CONVERT) as ex:
+                futs = {ex.submit(file_to_jpeg, img_paths[i]): i for i in range(len(img_paths))}
+                for fut in as_completed(futs):
+                    jpeg_map[futs[fut]] = fut.result()
+            jpegs = [b for b in jpeg_map if b is not None]
+            # Build chapter map from directory structure (each ch_X.X dir is one chapter)
+            page_cursor = 1
+            for i in range(chapter_count):
+                ch_num = start_num_mf + i
+                label = f"Chapter {int(ch_num) if ch_num == int(ch_num) else ch_num}"
+                chap_dir = os.path.join(tmp_dir, f"ch_{start_num_mf + i}")
+                # Count how many images were in this chapter dir
+                ch_imgs = sorted([
+                    f for root, _, files in os.walk(chap_dir)
+                    for f in files if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+                ])
+                if not ch_imgs:
+                    break
+                chapter_page_map.append((label, page_cursor))
+                page_cursor += len(ch_imgs)
 
         elif "comick.io" in chapter_url:
             update(status="fetching_meta")
             update(status="downloading", progress=0, total=chapter_count)
+            parsed_ck = parse_comick_url(chapter_url)
+            start_num_ck = float(parsed_ck[2]) if parsed_ck else 1.0
             img_paths = comick_download_images(
                 chapter_url, chapter_count, tmp_dir, on_chapter_done, cancel_event
             )
-            jpegs = [file_to_jpeg(p) for p in img_paths]
+            update(status="building_pdf")
+            jpeg_map_ck: List[Optional[bytes]] = [None] * len(img_paths)
+            with ThreadPoolExecutor(max_workers=PARALLEL_CONVERT) as ex:
+                futs = {ex.submit(file_to_jpeg, img_paths[i]): i for i in range(len(img_paths))}
+                for fut in as_completed(futs):
+                    jpeg_map_ck[futs[fut]] = fut.result()
+            jpegs = [b for b in jpeg_map_ck if b is not None]
+            page_cursor = 1
+            for i in range(chapter_count):
+                ch_num = start_num_ck + i
+                label = f"Chapter {int(ch_num) if ch_num == int(ch_num) else ch_num}"
+                chap_dir = os.path.join(tmp_dir, f"ch_{i+1:04d}")
+                ch_imgs = sorted([
+                    f for root, _, files in os.walk(chap_dir)
+                    for f in files if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+                ])
+                if not ch_imgs:
+                    break
+                chapter_page_map.append((label, page_cursor))
+                page_cursor += len(ch_imgs)
 
         else:
             # Generic: gallery-dl with URL increment, HTML scrape fallback
             update(status="fetching_meta")
             update(status="downloading", progress=0, total=chapter_count)
+            # Detect start chapter for labeling
+            m_gen = re.search(r'(?:chapter|ch|c|ep)[-/.]?(\d+(?:\.\d+)?)', chapter_url, re.I)
+            start_num_gen = float(m_gen.group(1)) if m_gen else 1.0
             img_paths = generic_download_images(
                 chapter_url, chapter_count, tmp_dir, on_chapter_done, cancel_event
             )
-            jpegs = [file_to_jpeg(p) for p in img_paths]
+            update(status="building_pdf")
+            jpeg_map_gen: List[Optional[bytes]] = [None] * len(img_paths)
+            with ThreadPoolExecutor(max_workers=PARALLEL_CONVERT) as ex:
+                futs = {ex.submit(file_to_jpeg, img_paths[i]): i for i in range(len(img_paths))}
+                for fut in as_completed(futs):
+                    jpeg_map_gen[futs[fut]] = fut.result()
+            jpegs = [b for b in jpeg_map_gen if b is not None]
+            page_cursor = 1
+            for i in range(chapter_count):
+                ch_num = start_num_gen + i
+                label = f"Chapter {int(ch_num) if ch_num == int(ch_num) else ch_num}"
+                chap_dir = os.path.join(tmp_dir, f"ch_{i+1:04d}")
+                ch_imgs = sorted([
+                    f for root, _, files in os.walk(chap_dir)
+                    for f in files if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+                ])
+                if not ch_imgs:
+                    break
+                chapter_page_map.append((label, page_cursor))
+                page_cursor += len(ch_imgs)
 
         update(status="building_pdf")
-        pdf = build_pdf(jpegs)
+        pdf = build_pdf(jpegs, chapter_page_map if chapter_page_map else None)
+        if len(pdf) > MAX_PDF_BYTES:
+            update(status="error", error="Generated PDF exceeds 500 MB size limit.")
+            return
         update(status="done", pdf=pdf)
 
     except InterruptedError:
@@ -763,11 +980,40 @@ def index():
 def start_merge():
     body = request.get_json(force=True)
     url = (body.get("url") or "").strip()
-    count = int(body.get("chapters", 5))
     if not url:
         return jsonify({"error": "URL is required"}), 400
-    if count < 1 or count > 50:
-        return jsonify({"error": "chapters must be between 1 and 50"}), 400
+
+    # Accept either end_chapter (new UI) or chapters (legacy count)
+    end_chapter = body.get("end_chapter")
+    start_chapter = body.get("start_chapter")
+    if end_chapter is not None and start_chapter is not None:
+        try:
+            end_ch = float(end_chapter)
+            start_ch = float(start_chapter)
+            count = max(1, int(end_ch - start_ch) + 1)
+        except (ValueError, TypeError):
+            return jsonify({"error": "Invalid chapter numbers"}), 400
+    else:
+        count = int(body.get("chapters", 5))
+
+    if count < 1 or count > 500:
+        return jsonify({"error": "Chapter range must result in 1–500 chapters"}), 400
+
+    url_err = _validate_url(url)
+    if url_err:
+        return jsonify({"error": url_err}), 400
+
+    # Cap concurrent active jobs to prevent resource exhaustion
+    with jobs_lock:
+        active = sum(1 for j in jobs.values() if j["status"] not in ("done", "error", "cancelled"))
+    if active >= MAX_CONCURRENT_JOBS:
+        return jsonify({"error": "Too many active jobs. Please wait for one to finish."}), 429
+
+    # Determine start chapter number for progress labeling
+    detected_start = start_chapter if start_chapter is not None else None
+    if detected_start is None:
+        m = re.search(r'(?:chapter|ch|c|ep)[-/.]?(\d+(?:\.\d+)?)', url, re.I)
+        detected_start = float(m.group(1)) if m else 1.0
 
     job_id = str(uuid.uuid4())
     with jobs_lock:
@@ -776,6 +1022,11 @@ def start_merge():
             "error": None, "pdf_bytes": None, "pdf_size": 0,
             "suggested_filename": "manhwa.pdf",
             "cancel_event": threading.Event(),
+            "created_at": time.time(),
+            "started_at": None,
+            "start_chapter": float(detected_start),
+            "chapter_count": count,
+            "eta_seconds": None,
         }
 
     threading.Thread(target=merge_job, args=(job_id, url, count), daemon=True).start()
@@ -805,6 +1056,9 @@ def job_status(job_id: str):
         "error": job["error"],
         "pdf_size": job["pdf_size"],
         "suggested_filename": job["suggested_filename"],
+        "start_chapter": job.get("start_chapter", 1),
+        "chapter_count": job.get("chapter_count", 0),
+        "eta_seconds": job.get("eta_seconds"),
     })
 
 
@@ -814,7 +1068,8 @@ def download_pdf(job_id: str):
         job = jobs.get(job_id)
     if not job or job["status"] != "done":
         return jsonify({"error": "PDF not ready"}), 404
-    filename = request.args.get("name", job["suggested_filename"]) or "manhwa.pdf"
+    raw_name = request.args.get("name", job["suggested_filename"]) or "manhwa.pdf"
+    filename = secure_filename(raw_name) or "manhwa.pdf"
     if not filename.endswith(".pdf"):
         filename += ".pdf"
     return send_file(
