@@ -3,17 +3,24 @@
 Merge multiple manhwa / manga chapters into a single continuous PDF in seconds.  
 Paste a chapter URL, pick how many chapters, download one clean PDF. Runs 100% on your own computer — no accounts, no cloud, no ads.
 
+![Version](https://img.shields.io/badge/version-2.0.0-7c6af7)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Mac%20%7C%20Linux%20%7C%20Windows-lightgrey)
+
+> **[View full changelog →](CHANGELOG.md)** — includes download instructions for every version.
 
 ---
 
 ## Features
 
-- **One-click merging** — paste a chapter URL, set the count, done
-- **Auto chapter navigation** — finds the next chapters automatically
-- **Live progress** — percentage bar with per-chapter updates
+- **One-click merging** — paste a chapter URL, enter the end chapter number, done
+- **Parallel downloads** — 4 chapters download simultaneously (~3–4× faster)
+- **PDF chapter bookmarks** — jump to any chapter from the sidebar in any PDF viewer
+- **Companion PDF Viewer** — manga-optimised reader with chapter nav, keyboard shortcuts, and zoom (`viewer/`)
+- **Auto start-chapter detection** — reads the chapter number directly from the URL
+- **ETA + live chapter progress** — shows "Downloading Chapter 23 of 50… ~4 min remaining"
+- **Auto chapter navigation** — finds subsequent chapters automatically
 - **Cancel anytime** — stop mid-download without restarting
 - **Inline retry** — recovers from errors without a page reload
 - **Editable filename** — rename before saving
@@ -158,7 +165,14 @@ manhwa-pdf-merger/
 ├── requirements.txt    # Python dependencies
 ├── start.sh            # Mac/Linux launcher
 ├── start.bat           # Windows launcher
-└── install.sh          # One-liner installer (Mac/Linux)
+├── install.sh          # One-liner installer (Mac/Linux)
+├── CHANGELOG.md        # Version history
+└── viewer/             # Companion PDF Viewer app (port 5056)
+    ├── app.py          # Flask backend for the viewer
+    ├── templates/
+    │   └── viewer.html # PDF.js-based reader UI
+    ├── requirements.txt
+    └── start.sh        # Run with: cd viewer && bash start.sh
 ```
 
 ---
