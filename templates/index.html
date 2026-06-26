@@ -179,6 +179,24 @@
   .save-btn:hover { opacity: 0.88; }
   .save-btn:active { transform: scale(0.98); }
 
+  .viewer-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 10px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 10px;
+    padding: 11px;
+    font-size: 14px;
+    font-weight: 600;
+    text-decoration: none;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .viewer-btn:hover { border-color: var(--accent); color: var(--accent); }
+
   /* ── Error / Cancelled ── */
   #error-box {
     display: none;
@@ -233,15 +251,16 @@
   <div class="subtitle">Combine chapters into one continuous PDF</div>
 
   <div class="field">
-    <label for="url">First chapter URL</label>
-    <input id="url" type="url" placeholder="https://mangafire.to/read/… or https://mangadex.org/chapter/…" autocomplete="off" />
+    <label for="url">Start chapter URL</label>
+    <input id="url" type="url" placeholder="https://mangafire.to/read/… or https://mangadex.org/chapter/…" autocomplete="off" oninput="onUrlInput()" />
+    <div class="hint" id="start-hint" style="min-height:18px"></div>
   </div>
 
   <div class="row">
     <div class="field">
-      <label for="count">Chapters to merge</label>
-      <input id="count" type="number" value="5" min="1" max="50" />
-      <div class="hint">1 – 50 chapters</div>
+      <label for="end-chapter">End chapter</label>
+      <input id="end-chapter" type="number" value="10" min="1" step="1" oninput="this.dataset.userSet='1'" />
+      <div class="hint">Downloads start → end (inclusive)</div>
     </div>
   </div>
 
@@ -278,6 +297,7 @@
       <input id="filename" type="text" value="manhwa.pdf" spellcheck="false" />
     </div>
     <button class="save-btn" onclick="savePDF()">&#8595; Save PDF</button>
+    <a class="viewer-btn" href="http://localhost:5056" target="_blank" rel="noopener">&#128214; Open in Viewer</a>
   </div>
 
   <div class="sites-note">
@@ -290,7 +310,37 @@
 <script>
   let pollTimer = null;
   let currentJobId = null;
-  let currentCount = 5;
+  let detectedStartChapter = null;
+
+  // Extract chapter number from a URL for the start-chapter hint
+  function detectChapterFromUrl(url) {
+    // Query param: ?episode_no=N
+    let m = url.match(/[?&]episode_no=(\d+(?:\.\d+)?)/);
+    if (m) return parseFloat(m[1]);
+    // Path: /chapter-N, /ch-N, /ep-N, /chapter/N etc.
+    m = url.match(/\/(?:chapter|ch|c|ep|episode)[-/.]?(\d+(?:\.\d+)?)/i);
+    if (m) return parseFloat(m[1]);
+    return null;
+  }
+
+  function onUrlInput() {
+    const url = document.getElementById("url").value.trim();
+    const hint = document.getElementById("start-hint");
+    const ch = detectChapterFromUrl(url);
+    detectedStartChapter = ch;
+    if (ch !== null) {
+      hint.textContent = `Detected start: Chapter ${ch}`;
+      hint.style.color = "var(--accent)";
+      // Auto-set end chapter to start+9 if not customised
+      const endInput = document.getElementById("end-chapter");
+      if (!endInput.dataset.userSet) {
+        endInput.value = Math.round(ch + 9);
+      }
+    } else {
+      hint.textContent = url ? "Could not detect chapter — ensure URL has /chapter-N or /ep-N" : "";
+      hint.style.color = "var(--muted)";
+    }
+  }
 
   const STATUS_LABELS = {
     queued:       "Queued…",
@@ -307,6 +357,12 @@
     if (!bytes) return "";
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + " KB";
     return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  function fmtEta(seconds) {
+    if (seconds < 60) return `~${seconds}s remaining`;
+    const m = Math.ceil(seconds / 60);
+    return `~${m} min remaining`;
   }
 
   function setBar(pct) {
@@ -355,10 +411,16 @@
 
   async function startMerge() {
     const url = document.getElementById("url").value.trim();
-    const count = parseInt(document.getElementById("count").value) || 5;
-    currentCount = count;
+    const endChapter = parseFloat(document.getElementById("end-chapter").value);
 
     if (!url) { showError("Please enter a chapter URL."); return; }
+    if (isNaN(endChapter) || endChapter < 1) { showError("Please enter a valid end chapter number."); return; }
+
+    const startChapter = detectedStartChapter !== null ? detectedStartChapter : 1;
+    if (endChapter < startChapter) {
+      showError(`End chapter (${endChapter}) must be ≥ start chapter (${startChapter}).`);
+      return;
+    }
 
     resetUI();
     document.getElementById("progress-section").style.display = "block";
@@ -371,7 +433,7 @@
     const res = await fetch("/api/merge", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, chapters: count }),
+      body: JSON.stringify({ url, start_chapter: startChapter, end_chapter: endChapter }),
     }).catch(() => null);
 
     if (!res || !res.ok) {
@@ -404,8 +466,15 @@
 
     } else if (d.status === "downloading") {
       const pct = d.total > 0 ? (d.progress / d.total) : 0;
-      document.getElementById("status-text").textContent =
-        `Downloading chapter ${d.progress} of ${d.total}…`;
+      // Show actual chapter number (start_chapter + offset), not just index
+      const startCh = d.start_chapter || 1;
+      const currentCh = startCh + d.progress - 1;
+      const endCh = startCh + d.chapter_count - 1;
+      let statusMsg = `Downloading Chapter ${currentCh} of ${endCh}…`;
+      if (d.eta_seconds != null && d.eta_seconds > 0) {
+        statusMsg += " · " + fmtEta(d.eta_seconds);
+      }
+      document.getElementById("status-text").textContent = statusMsg;
       setBar(20 + pct * 65);
 
     } else if (d.status === "building_pdf") {
